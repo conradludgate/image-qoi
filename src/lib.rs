@@ -1,6 +1,7 @@
 use std::{
     io::{BufReader, Read},
     mem::MaybeUninit,
+    num::Wrapping,
 };
 
 use image::{
@@ -96,17 +97,25 @@ impl<'a, R: Read + 'a> ImageDecoder<'a> for QoiDecoder<R> {
 
 #[repr(C)]
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub struct Rgba([u8; 4]);
+pub struct Rgba([Wrapping<u8>; 4]);
 
 impl Rgba {
-    const ZERO: Self = Self([0; 4]);
-    const INIT: Self = Self([0, 0, 0, 255]);
-    fn alpha(&self) -> u8 {
+    const ZERO: Self = Self([Wrapping(0); 4]);
+    const INIT: Self = Self([Wrapping(0), Wrapping(0), Wrapping(0), Wrapping(255)]);
+    fn alpha(self) -> Wrapping<u8> {
         self.0[3]
     }
-    fn hash(&self) -> u8 {
+    fn hash(self) -> u8 {
         let Self([r, g, b, a]) = self;
-        (r.wrapping_mul(3) + g.wrapping_mul(5) + b.wrapping_mul(7) + a.wrapping_mul(11)) % 64
+        (r * Wrapping(3) + g * Wrapping(5) + b * Wrapping(7) + a * Wrapping(11)).0 % 64
+    }
+    fn bytes(self) -> [u8; 4] {
+        let Self([Wrapping(r), Wrapping(g), Wrapping(b), Wrapping(a)]) = self;
+        [r, g, b, a]
+    }
+    fn from_bytes(bytes: [u8; 4]) -> Self {
+        let [r, g, b, a] = bytes;
+        Self([Wrapping(r), Wrapping(g), Wrapping(b), Wrapping(a)])
     }
 }
 
@@ -161,38 +170,28 @@ impl<R: Read> Read for QoiReader<R> {
                     0b11 => {
                         let run = (tag & 0b0011_1111) + 1;
                         QoiRemaining {
-                            bytes: self.latest.0,
+                            bytes: self.latest.bytes(),
                             count: run as usize * 4,
                         }
                     }
                     0b10 => {
-                        let dg = (tag & 0b0011_1111).wrapping_sub(32);
+                        let dg = Wrapping(tag & 0b0011_1111) - Wrapping(32);
                         let dr_db = self.read_tag()?;
-                        let dr_dg = (dr_db >> 4).wrapping_sub(8);
-                        let db_dg = (dr_db & 0b0000_1111).wrapping_sub(8);
-                        let dr = dr_dg.wrapping_add(dg);
-                        let db = db_dg.wrapping_add(dg);
+                        let dr_dg = Wrapping(dr_db >> 4) - Wrapping(8);
+                        let db_dg = Wrapping(dr_db & 0b0000_1111) - Wrapping(8);
+                        let dr = dr_dg + dg;
+                        let db = db_dg + dg;
                         let Rgba([r, g, b, a]) = self.latest;
 
-                        self.save_pixel(Rgba([
-                            r.wrapping_add(dr),
-                            g.wrapping_add(dg),
-                            b.wrapping_add(db),
-                            a,
-                        ]))
+                        self.save_pixel(Rgba([r + dr, g + dg, b + db, a]))
                     }
                     0b01 => {
-                        let dr = ((tag >> 4) & 0b0011).wrapping_sub(2);
-                        let dg = ((tag >> 2) & 0b0011).wrapping_sub(2);
-                        let db = (tag  & 0b0011).wrapping_sub(2);
+                        let dr = Wrapping((tag >> 4) & 0b0011) - Wrapping(2);
+                        let dg = Wrapping((tag >> 2) & 0b0011) - Wrapping(2);
+                        let db = Wrapping(tag & 0b0011) - Wrapping(2);
                         let Rgba([r, g, b, a]) = self.latest;
 
-                        self.save_pixel(Rgba([
-                            r.wrapping_add(dr),
-                            g.wrapping_add(dg),
-                            b.wrapping_add(db),
-                            a,
-                        ]))
+                        self.save_pixel(Rgba([r + dr, g + dg, b + db, a]))
                     }
                     _ => {
                         let index = tag & 0b0011_1111;
@@ -212,7 +211,7 @@ impl<R: Read> QoiReader<R> {
         self.latest = pixel;
         self.pixels[pixel.hash() as usize] = pixel;
         QoiRemaining {
-            bytes: pixel.0,
+            bytes: pixel.bytes(),
             count: 4,
         }
     }
@@ -224,20 +223,20 @@ impl<R: Read> QoiReader<R> {
     fn read_rgba(&mut self) -> std::io::Result<QoiRemaining> {
         let mut rgba = [0; 4];
         self.buffer.read_exact(&mut rgba)?;
-        Ok(self.save_pixel(Rgba(rgba)))
+        Ok(self.save_pixel(Rgba::from_bytes(rgba)))
     }
     fn read_rgb(&mut self) -> std::io::Result<QoiRemaining> {
-        let mut rgba = [0, 0, 0, self.latest.alpha()];
+        let mut rgba = [0, 0, 0, self.latest.alpha().0];
         self.buffer.read_exact(&mut rgba[0..3])?;
-        Ok(self.save_pixel(Rgba(rgba)))
+        Ok(self.save_pixel(Rgba::from_bytes(rgba)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, fs::File};
+    use std::{fs::File, path::PathBuf};
 
-    use image::{codecs::png::PngDecoder, ImageDecoder};
+    use image::{codecs::png::PngDecoder, DynamicImage};
     use test_case::test_case;
 
     use crate::QoiDecoder;
@@ -251,21 +250,17 @@ mod tests {
     #[test_case("wikipedia_008")]
     fn validate(file: &str) {
         let base = PathBuf::from("qoi_test_images");
-        let png = base.join(file).with_extension("png");
-        let qoi = base.join(file).with_extension("qoi");
 
+        let png = base.join(file).with_extension("png");
         let png = File::open(png).unwrap();
         let png = PngDecoder::new(png).unwrap();
-        let (w, h) = png.dimensions();
-        let mut png_buf = vec![0; (w*h*4) as usize];
-        png.read_image(&mut png_buf).unwrap();
+        let png = DynamicImage::from_decoder(png).unwrap().into_rgba8();
 
+        let qoi = base.join(file).with_extension("qoi");
         let qoi = File::open(qoi).unwrap();
         let qoi = QoiDecoder::new(qoi).unwrap();
-        assert_eq!(qoi.dimensions(), (w, h));
-        let mut qoi_buf = vec![0; (w*h*4) as usize];
-        qoi.read_image(&mut qoi_buf).unwrap();
+        let qoi = DynamicImage::from_decoder(qoi).unwrap().into_rgba8();
 
-        assert_eq!(qoi_buf, png_buf);
+        assert_eq!(qoi, png);
     }
 }
