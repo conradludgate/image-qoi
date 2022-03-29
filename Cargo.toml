@@ -2,8 +2,10 @@
 name = "image-qoi"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ['Conrad Ludgate <conradludgate@gmail.com>']
+license = 'MIT/Apache-2.0'
+description = 'Quote Ok Image format with interop with Image'
+repository = 'https://github.com/conradludgate/image-qoi'
 
 [dependencies]
 image = "0.24"
