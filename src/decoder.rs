@@ -1,58 +1,23 @@
-use std::{
-    io::{BufReader, Read},
-    mem::MaybeUninit,
-};
+use std::io::{BufReader, Read};
 
-use image::{
-    error::{DecodingError, ImageFormatHint},
-    ImageDecoder, ImageError, ImageResult,
-};
+use image::{ImageDecoder, ImageError, ImageResult, Progress};
 
-use crate::QoiReader;
+use crate::{QoiHeader, QoiReader};
 
-#[repr(C)]
-pub struct QoiHeader {
-    magic: [u8; 4], // magic bytes "qoif"
-    width: u32,     // image width in pixels (BE)
-    height: u32,    // image height in pixels (BE)
-    channels: u8,   // 3 = RGB, 4 = RGBA
-    colorspace: u8, // 0 = sRGB with linear alpha
-                    // 1 = all channels linear
-}
-
-impl TryFrom<&[u8]> for QoiHeader {
-    type Error = image::error::DecodingError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < 14 {
-            return Err(DecodingError::new(
-                ImageFormatHint::Unknown,
-                "not enough bytes for header",
-            ));
-        }
-
-        let mut this = unsafe {
-            let mut this = MaybeUninit::<QoiHeader>::uninit();
-            this.as_mut_ptr()
-                .cast::<u8>()
-                .copy_from_nonoverlapping(value.as_ptr(), 14);
-            this.assume_init()
-        };
-
-        if &this.magic != b"qoif" {
-            return Err(DecodingError::new(
-                ImageFormatHint::Unknown,
-                "qoif magic header not found",
-            ));
-        }
-
-        this.width = u32::from_be(this.width);
-        this.height = u32::from_be(this.height);
-
-        Ok(this)
-    }
-}
-
+/// An [`ImageDecoder`] for the [Quite Ok Image Format](https://qoiformat.org).
+///
+/// ```
+/// # use std::fs::File;
+/// use image::DynamicImage;
+/// use image_qoi::QoiDecoder;
+///
+/// # fn main() -> image::ImageResult<()> {
+/// let file = File::open("qoi_test_images/dice.qoi")?;
+/// let decoder = QoiDecoder::new(file)?;
+/// let image = DynamicImage::from_decoder(decoder)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct QoiDecoder<R> {
     header: QoiHeader,
     buffer: BufReader<R>,
@@ -76,11 +41,40 @@ impl<'a, R: Read + 'a> ImageDecoder<'a> for QoiDecoder<R> {
     }
 
     fn color_type(&self) -> image::ColorType {
-        image::ColorType::Rgba8
+        if self.header.is_rgba() {
+            image::ColorType::Rgba8
+        } else {
+            image::ColorType::Rgb8
+        }
     }
 
     fn into_reader(self) -> ImageResult<Self::Reader> {
-        Ok(QoiReader::new(self.buffer))
+        Ok(QoiReader::new(self.header, self.buffer))
+    }
+
+    fn scanline_bytes(&self) -> u64 {
+        self.color_type().bytes_per_pixel() as u64
+    }
+
+    fn read_image_with_progress<F: Fn(Progress)>(
+        self,
+        mut buf: &mut [u8],
+        _progress_callback: F,
+    ) -> ImageResult<()> {
+        let total_bytes = self.total_bytes() as usize;
+        assert_eq!(buf.len(), total_bytes);
+
+        let mut reader = self.into_reader()?;
+
+        while !buf.is_empty() {
+            let pixel = reader.load_next_pixel()?;
+            for _ in 0..(pixel.count / pixel.chans) {
+                buf[..pixel.chans].copy_from_slice(&pixel.bytes[..pixel.chans]);
+                buf = &mut buf[pixel.chans..]
+            }
+        }
+
+        Ok(())
     }
 }
 

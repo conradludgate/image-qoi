@@ -1,14 +1,22 @@
 [package]
 name = "image-qoi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ['Conrad Ludgate <conradludgate@gmail.com>']
 license = 'MIT/Apache-2.0'
 description = 'Quote Ok Image format with interop with Image'
 repository = 'https://github.com/conradludgate/image-qoi'
 
+exclude = ["qoi_test_images"]
+
 [dependencies]
 image = "0.24"
 
 [dev-dependencies]
 test-case = "2.0.2"
+rapid-qoi = "0.6"
+criterion = "0.3"
+
+[[bench]]
+name = "decoding"
+harness = false
